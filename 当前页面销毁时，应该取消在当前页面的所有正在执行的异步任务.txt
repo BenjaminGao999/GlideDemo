@@ -1,0 +1,139 @@
+# # 问题描述
+
+  java.lang.RuntimeException: Unable to destroy activity {com.gaos.glidedemo/com.gaos.glidedemo.SecondActivity}: java.lang.IllegalArgumentException: You cannot start a load for a destroyed activity
+                                                                        at android.app.ActivityThread.performDestroyActivity(ActivityThread.java:4447)
+                                                                        at android.app.ActivityThread.handleDestroyActivity(ActivityThread.java:4465)
+                                                                        at android.app.ActivityThread.-wrap6(ActivityThread.java)
+                                                                        at android.app.ActivityThread$H.handleMessage(ActivityThread.java:1678)
+                                                                        at android.os.Handler.dispatchMessage(Handler.java:102)
+                                                                        at android.os.Looper.loop(Looper.java:185)
+                                                                        at android.app.ActivityThread.main(ActivityThread.java:6493)
+                                                                        at java.lang.reflect.Method.invoke(Native Method)
+                                                                        at com.android.internal.os.ZygoteInit$MethodAndArgsCaller.run(ZygoteInit.java:916)
+                                                                        at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:806)
+                                                                     Caused by: java.lang.IllegalArgumentException: You cannot start a load for a destroyed activity
+                                                                        at com.bumptech.glide.manager.RequestManagerRetriever.assertNotDestroyed(RequestManagerRetriever.java:134)
+                                                                        at com.bumptech.glide.manager.RequestManagerRetriever.get(RequestManagerRetriever.java:102)
+                                                                        at com.bumptech.glide.Glide.with(Glide.java:681)
+                                                                        at com.gaos.glidedemo.SecondActivity.onDestroy(SecondActivity.java:74)
+                                                                        at android.app.Activity.performDestroy(Activity.java:7176)
+                                                                        at android.app.Instrumentation.callActivityOnDestroy(Instrumentation.java:1154)
+                                                                        at android.app.ActivityThread.performDestroyActivity(ActivityThread.java:4434)
+                                                                        at android.app.ActivityThread.handleDestroyActivity(ActivityThread.java:4465) 
+                                                                        at android.app.ActivityThread.-wrap6(ActivityThread.java) 
+                                                                        at android.app.ActivityThread$H.handleMessage(ActivityThread.java:1678) 
+                                                                        at android.os.Handler.dispatchMessage(Handler.java:102) 
+                                                                        at android.os.Looper.loop(Looper.java:185) 
+                                                                        at android.app.ActivityThread.main(ActivityThread.java:6493) 
+                                                                        at java.lang.reflect.Method.invoke(Native Method) 
+                                                                        at com.android.internal.os.ZygoteInit$MethodAndArgsCaller.run(ZygoteInit.java:916) 
+                                                                        at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:806) 
+
+
+  /*
+    * call finish -> onStop -> onDestroy
+    *
+    * call onBackPressed -> finish -> onStop -> onDestroy
+    * */
+
+    @Override
+    public void finish() {
+        super.finish();
+        Log.d(TAG, "finish: " + TAG);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        Log.d(TAG, "onStop: " + TAG);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        Log.d(TAG, "onDestroy: " + TAG);
+        Glide.with(this).onDestroy();  -----------> 在 onDestroy 里调用 就会崩溃；
+    }
+
+ /*
+    * call finish -> onStop -> onDestroy
+    *
+    * call onBackPressed -> finish -> onStop -> onDestroy
+    * */
+
+    @Override
+    public void finish() {
+        super.finish();
+        Log.d(TAG, "finish: " + TAG);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        Log.d(TAG, "onStop: " + TAG);
+        Glide.with(this).onDestroy();   ----------------> 在 onStop 里调用， 不会崩溃； 在 finish 方法里调用，也不会崩溃；
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        Log.d(TAG, "onDestroy: " + TAG);
+    }
+
+
+# # # 跨线程引用Activity Context
+
+主线程Activity实例销毁， 子线程 还要 引用 已销毁的 Activity 的 Context， 合理吗？
+
+Activity实例销毁前调用finish方法；
+所以说 用Glide如果引用了Activity的Context,就需要在Activity的onDestroy方法之前的onStop/finish方法里，取消Glide的异步线程；
+
+要不然就用applicationContext， 这个全局上下文一直存在；
+
+# # #  Glide 取消正在执行的子线程
+
+ Glide.with(this).onDestroy();
+
+
+
+# # # # Glide 不予许 在子线程里调用下面的方法
+
+          Glide.with(SecondActivity.this)
+                        .load(picURL)
+                        .centerCrop()
+                        .into(ivDemo);
+
+                Glide.with(SecondActivity.this).load(picURL).asBitmap().into(new SimpleTarget<Bitmap>() {
+                    @Override
+                    public void onResourceReady(final Bitmap resource, GlideAnimation<? super Bitmap> glideAnimation) {
+
+
+                        ivDemo.setScaleType(ImageView.ScaleType.CENTER);
+
+                        if (resource != null) {
+
+                            ivDemo.setImageBitmap(resource);
+                        }
+                    }
+                });
+
+
+
+# # # #  bitmapSimpleTarget.getRequest().clear();
+# # # #   Glide.with(this).onDestroy();
+
+Let me share my thoughts about this. After digging into the code I have 2 ideas:
+
+Add new separate method RequestManager::clear(target) which does the same as does RequestManager::onDestroy() but works for the concrete view. This method is present in the latest code from master and I wonder if it can be cherry picked to the 3.0 branch.
+This method would be very useful for unbinding custom views which use Glide.with(activity) from their RequestManager when they are untouched from window.
+Add new lifecycle callback for onDestroyView() and handle it in different way that onDestroy() does. It should clear only targets which extend ViewTarget. It would be universal out of the box solution to avoid memory leaks of views in fragments.
+
+
+##################### 如果你的Glide引用的是Activity的Context， 那么你得在Activity销毁前（onDestroy方法调用前），
+Glide.with(this).onDestroy();
+或者 bitmapSimpleTarget.getRequest().clear();
+
+#################### 如果你的Glide引用的是Application的Context，可以不做额外操作；
+
+
+
